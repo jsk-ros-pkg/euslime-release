@@ -34,9 +34,18 @@
   "Path to Euslisp SLIME compiled files."
   :type 'string)
 
+(defcustom euslime-match-function 'tag-implicit-name-match-p
+  "Match function passed to `euslime-find-definitions' for finding a tag."
+  :type 'symbol)
+
 (defcustom inferior-euslisp-program "roseus"
   "Backend program invoked by Euslisp SLIME."
   :type 'string)
+
+(defcustom slime-use-slime-clear-screen t
+  "Clear screen instead of recentering on slime repl"
+  :group 'slime-mode
+  :type 'boolean)
 
 (defvar slime-lisp-implementations)
 (unless slime-lisp-implementations
@@ -54,8 +63,7 @@
 ;; Start EusLisp mode
 (add-hook 'slime-repl-mode-hook
           (lambda ()
-            (when (string= "euslisp"
-                   (ignore-errors (slime-connection-name (slime-current-connection))))
+            (when (string= (ignore-errors (slime-connection-name)) "euslisp")
               (slime-euslisp-mode 1))))
 
 (defun euslime-prepare-files ()
@@ -75,12 +83,15 @@
                    (expand-file-name "slime-util" euslime-compile-path)
                    "SLIME")
            (format "(load %S :package %S)\n"
+                   (expand-file-name "slime-connection" euslime-compile-path)
+                   "SLIME")
+           (format "(load %S :package %S)\n"
                    (expand-file-name "slime-toplevel" euslime-compile-path)
                    "LISP"))
           nil file)))
 
     (let* ((loader (expand-file-name "slime-loader.l" euslime-compile-path))
-           (files (cl-mapcan #'needs-compile (list "slime-util" "slime-toplevel")))
+           (files (cl-mapcan #'needs-compile (list "slime-util" "slime-connection" "slime-toplevel")))
            (res (apply #'euslime-compile-files files)))
       (cond
        ((null res) ;; FILES UP-TO-DATE
@@ -138,7 +149,7 @@
       (message (format "Generating %s file..." tag-file))
       (shell-command
        ;; Include `(:methods' in l files
-       (format "etags --regex='/[ \\t]*(:[^ \\t\\$]*/' %s/*.l %s-o %s"
+       (format "etags --regex='/[ \\t]*(:[^ \\t\\$\\(]*/' %s/*.l %s-o %s"
                (expand-file-name (or ldir "") src-dir)
                ;; Include `pointer FUNCTIONS' in c files
                (if ctags
@@ -149,6 +160,61 @@
                  "")
                tag-file)))
     (cl-pushnew tag-file tags-table-list)))
+
+(defun etags-class-of-tag ()
+  (save-excursion
+    (re-search-backward "\n\\(\(defmethod [^\n\t ]*\\)[ \t]*\177[0-9]*,[0-9]*\n")
+    (buffer-substring (match-beginning 1) (match-end 1))))
+
+(defun euslime-find-definitions (name &rest other-names)
+  ;; e.g. (euslime-find-definitions "simple-action-server" "ros::simple-action-server")
+  (let ((first-table t)
+        result)
+    (flet ((etag>xref (file tag-info)
+             `(,(concat
+                 (if (string-match-p "(:" (car tag-info)) ;; class method
+                     ;; ignore-errors ?
+                     (save-excursion (forward-line 1) (etags-class-of-tag)))
+                 (car tag-info))
+               (:location
+                (:file ,file)
+                (:position ,(cddr tag-info))
+                (:snippet ,(car tag-info))))))
+      (visit-tags-table-buffer (car tags-table-list))
+      (while (or first-table (visit-tags-table-buffer t))
+        (if first-table (setq first-table nil))
+        (goto-char (point-min))
+        (while (search-forward name nil t)
+          (when (or (funcall euslime-match-function name)
+                    (some #'(lambda (nm)
+                              (and (looking-back nm)
+                                   (funcall euslime-match-function nm)))
+                          other-names))
+            (beginning-of-line)
+            (push
+             (etag>xref
+              (expand-file-name (save-excursion (forward-line 1) (file-of-tag)))
+              (funcall snarf-tag-function))
+             result))))
+      result)))
+
+;; Override to abort operation instead of reinitializing (only have hard restarts)
+(defun slime-maybe-start-lisp (program program-args env directory buffer)
+  "Return a new or existing inferior lisp process."
+  (cond ((not (comint-check-proc buffer))
+         (slime-start-lisp program program-args env directory buffer))
+        ((slime-reinitialize-inferior-lisp-p program program-args env buffer)
+         (when (and (car program-args) (string= (car program-args) "euslime"))
+           (pop-to-buffer (slime-output-buffer))
+           (keyboard-quit))
+         (let ((conn (cl-find (get-buffer-process buffer)
+                              slime-net-processes
+                              :key #'slime-inferior-process)))
+           (when conn
+             (slime-net-close conn)))
+         (get-buffer-process buffer))
+        (t (slime-start-lisp program program-args env directory
+                             (generate-new-buffer-name buffer)))))
 
 (defun euslime-init (file _)
   (setq slime-protocol-version 'ignore)

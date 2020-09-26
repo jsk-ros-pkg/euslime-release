@@ -1,6 +1,6 @@
-from sexpdata import dumps, loads, Symbol
-import signal
+import threading
 import traceback
+from sexpdata import dumps, loads, Symbol
 
 from euslime.bridge import EuslispResult
 from euslime.handler import DebuggerHandler
@@ -12,6 +12,7 @@ log = get_logger(__name__)
 class Protocol(object):
     def __init__(self, handler, *args, **kwargs):
         self.handler = handler(*args, **kwargs)
+        self.thread_local = threading.local()
 
     def dumps(self, sexp):
         def with_header(sexp):
@@ -29,49 +30,41 @@ class Protocol(object):
                     else x for x in sexp]
             return with_header(sexp)
 
-    def make_error(self, id, err):
-        debug = DebuggerHandler(id, err)
-        self.handler.debugger.append(debug)
+    def make_error(self, err):
+        lvl = len(self.handler.debugger) + 1
+        deb = DebuggerHandler(self.thread_local.comm_id, lvl, err)
+        self.handler.debugger.append(deb)
+        yield deb.make_debug_response()
 
-        res = [
-            Symbol(':debug'),
-            0,  # the thread which threw the condition
-            len(self.handler.debugger),  # the depth of the condition
-            [debug.message, str(), None],  # s-exp with a description
-            debug.restarts,  # list of available restarts
-            debug.stack[:10],  # stacktrace
-            [None],  # pending continuation
-        ]
-        yield self.dumps(res)
-
-    def make_response(self, id, sexp):
+    def make_response(self, result_type, sexp):
         try:
-            res = [Symbol(':return'), {'ok': sexp}, id]
-            yield self.dumps(res)
+            res = [Symbol(':return'), {result_type: sexp}, self.thread_local.comm_id]
+            yield res
         except Exception as e:
-            self.command_id.append(id)
-            for r in self.make_error(id, e):
+            for r in self.make_error(e):
                 yield r
-
-    def interrupt(self):
-        yield self.dumps([Symbol(":read-aborted"), 0, 1])
-        self.handler.euslisp.process.send_signal(signal.SIGINT)
-        self.handler.euslisp.reset()
-        yield self.dumps([Symbol(':return'),
-                          {'abort': "'Keyboard Interrupt'"},
-                          self.handler.command_id.pop()])
 
     def process(self, data):
         data = loads(data)
         if data[0] == Symbol(":emacs-rex"):
             cmd, form, pkg, thread, comm_id = data
-            self.handler.command_id.append(comm_id)
             self.handler.package = pkg
+        elif data[0] == Symbol(":euslime-test"):
+            # Euslime Test Suite
+            # process the form and return a handshake in the end
+            cmd, comm_id, form = data
+            for r in self.process(dumps(form)):
+                yield r
+            yield [Symbol(":euslime-test"), comm_id]
+            return
         else:
             form = data
             comm_id = None
         func = form[0].value().replace(':', '_').replace('-', '_')
         args = form[1:]
+        if comm_id:
+            self.thread_local.comm_id = comm_id
+            log.debug("Processing id: %s ..." % comm_id)
 
         log.info("func: %s" % func)
         log.info("args: %s" % args)
@@ -80,17 +73,20 @@ class Protocol(object):
             gen = getattr(self.handler, func)(*args)
             if not gen:
                 if comm_id:
-                    for r in self.make_response(self.handler.command_id.pop(), None):
+                    for r in self.make_response('ok', None):
                         yield r
                 return
             for resp in gen:
                 if isinstance(resp, EuslispResult):
-                    for r in self.make_response(self.handler.command_id.pop(),
+                    for r in self.make_response(resp.response_type,
                                                 resp.value):
                         yield r
                 else:
-                    yield self.dumps(resp)
+                    yield resp
         except Exception as e:
             log.error(traceback.format_exc())
-            for r in self.make_error(self.handler.command_id[-1], e):
+            for r in self.make_error(e):
                 yield r
+
+        if comm_id:
+            log.debug("... Finished processing id: %s" % comm_id)

@@ -6,44 +6,57 @@ except ImportError:
 import socket
 import time
 import traceback
-from threading import Event, Thread
+from threading import Thread
 
 from euslime.handler import EuslimeHandler
 from euslime.logger import get_logger
 from euslime.protocol import Protocol
+from sexpdata import Symbol
 
 ENCODINGS = {
     'iso-latin-1-unix': 'latin-1',
     'iso-utf-8-unix': 'utf-8'
 }
 HEADER_LENGTH = 6
+ERROR_STRING = """;; You are still in a signal handler.
+;;Try reset or throw to upper level as soon as possible.
+"""
 
 log = get_logger(__name__)
 
 
 class EuslimeRequestHandler(S.BaseRequestHandler, object):
     def __init__(self, request, client_address, server):
-        self.swank = Protocol(EuslimeHandler, server.program, server.loader)
+        self.swank = Protocol(EuslimeHandler, server.program, server.loader,
+                              on_output=self._process_output)
         self.swank.handler.euslisp.color = server.color
         self.encoding = ENCODINGS.get(server.encoding, 'utf-8')
-        self.interrupt_request = Event()
         super(EuslimeRequestHandler, self).__init__(
             request, client_address, server)
 
     def _process_data(self, recv_data):
-        try:
-            for send_data in self.swank.process(recv_data):
-                if self.interrupt_request.is_set():
-                    self.interrupt_request.clear()
-                    return
-                log.debug('response: %s', send_data)
-                send_data = send_data.encode(self.encoding)
-                self.request.send(send_data)
-        except KeyboardInterrupt:
-            log.warn("Keyboard Interrupt!")
-            self.interrupt_request.set()
-            for msg in self.swank.interrupt():
-                self.request.send(msg)
+        for data in self.swank.process(recv_data):
+            log.debug('response: %s', data)
+            self.send_data(data)
+
+    def _process_output(self, out=None):
+        if not out:
+            return
+        log.debug('output: %s', out)
+        self.send_data([Symbol(":write-string"), out])
+        if ERROR_STRING in out:
+            # TODO: find a better way to detect error signals
+            # Even if the user issues a command with same output,
+            # read-mode will be desativated when the evaluation ends
+            log.error("Error signal received!")
+            log.debug("Entering read mode...")
+            self.swank.handler.euslisp.read_mode = True
+            self.send_data([Symbol(":read-string"), 0, 1])
+
+    def send_data(self, data):
+        send_data = self.swank.dumps(data)
+        send_data = send_data.encode(self.encoding)
+        self.request.send(send_data)
 
     def handle(self):
         """This method handles packets from swank client.
@@ -52,6 +65,9 @@ class EuslimeRequestHandler(S.BaseRequestHandler, object):
 
         e.g.) 000016(:return (:ok nil) 1)\n
         """
+
+        log.debug("Starting output handling loop...")
+        Thread(target=self._process_output).start()
         log.debug("Entering handle loop...")
         while not self.swank.handler.close_request.is_set():
             try:
@@ -74,7 +90,7 @@ class EuslimeRequestHandler(S.BaseRequestHandler, object):
                 try:
                     time.sleep(0.01)
                 except KeyboardInterrupt:
-                    log.warn("Nothing to interrupt!")
+                    log.info("server keyboard interrupt")
                 continue
             except Exception:
                 log.error(traceback.format_exc())
