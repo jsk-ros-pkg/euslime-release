@@ -2,6 +2,15 @@
 Changelog for package euslime
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.0 (2020-09-26)
+------------------
+* Major updates in python and toplevel
+* Better support for packages
+* Better TAGS functionality
+* Major updates to test suite
+* Bugfix
+* Contributors: Guilherme Affonso
+
 1.0.2 (2020-06-01)
 ------------------
 * Fix build by using catkin_virtualenv
