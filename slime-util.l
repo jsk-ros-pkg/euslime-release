@@ -38,18 +38,22 @@
 (defun split-package (name)
   ;; TODO: read |escaped\|forms|
   (let* ((pos (position-from-end #\: name))
-         (internal (and pos (plusp pos) (= #\: (elt name (1- pos))))))
+         (external (and pos (plusp pos) (not (= #\: (elt name (1- pos)))))))
     (case pos
-      (nil (values nil name))
-      (0 (values "KEYWORD" (subseq name (1+ pos))))
-      (t (values (string-upcase (subseq name 0 (if internal (1- pos) pos)))
-                 (subseq name (1+ pos)))))))
+      (nil (values nil name external))
+      (0 (values "KEYWORD" (subseq name (1+ pos)) external))
+      (t (values (string-upcase (subseq name 0 (if external pos (1- pos))))
+                 (subseq name (1+ pos))
+                 external)))))
 
 (defmacro slime-do-symbols (var &rest body)
-  ;; var: (variable-name &optional package result)
-  `(if ,(cadr var)
-       (if (find-package ,(cadr var)) (do-symbols ,var ,@body))
-       (do-callable-symbols (,(car var) ,(caddr var)) ,@body)))
+  ;; var: (variable-name &optional package external-p)
+  `(if ,(second var)
+       (if (find-package ,(second var))
+           (if ,(third var)
+               (do-external-symbols (,(car var) ,(cadr var)) ,@body)
+               (do-symbols (,(car var) ,(cadr var)) ,@body)))
+       (do-callable-symbols (,(car var)) ,@body)))
 
 (defmacro do-callable-symbols (var &rest forms)
   ;; var: (variable-name &optional result)
@@ -65,10 +69,13 @@
         (return-from find-external-symbol sym))))
 
 (defun find-callable-symbol (name)
-  (multiple-value-bind (pack name) (split-package name)
+  (multiple-value-bind (pack name external-p) (split-package name)
     (setq name (string-upcase name))
     (if pack
-        (and (find-package pack) (find-symbol name pack))
+        (and (find-package pack)
+             (if external-p
+                 (find-external-symbol name pack)
+                 (find-symbol name pack)))
         (or (find-symbol name) 
             (let ((packs (package-use *package*)))
               (dolist (p packs)
@@ -92,11 +99,39 @@
              ,@body
              ,@(cddr var-lst))))))
 
+(defun list-possible-symbol-names (sym)
+  (let ((name (symbol-pname sym))
+        (pkg (symbol-homepkg sym)))
+    (mapcar #'string-downcase
+            (remove-duplicates
+             (append
+              (if (eq pkg *keyword-package*)
+                  (list (format nil ":~A" name))
+                  (list name))
+              (mapcar #'(lambda (val) (format nil "~A::~A" val name))
+                      (send pkg :nicknames))
+              (if (find-external-symbol name pkg)
+                  (mapcar #'(lambda (val) (format nil "~A:~A" val name))
+                          (send pkg :nicknames))))
+             :test #'string-equal))))
+
+;; for optimization
+(defmacro is-send/instance-symbol (name)
+  ;; return "send", "instance" or nil
+  `(cdr (assoc ,name
+               ',(mapcan #'list
+                         (mapcar #'(lambda (val) (cons val "send"))
+                                 (list-possible-symbol-names 'send))
+                         (mapcar #'(lambda (val) (cons val "instance"))
+                                 (list-possible-symbol-names 'instance)))
+               :test #'string-equal)))
+
+
 ;; Prefix related
-(defun append-common (match-lst start-len)
+(defun append-common (match-lst len)
   (cond
     ((cdr match-lst)
-     (list match-lst (subseq (car match-lst) 0 (get-common match-lst start-len))))
+     (list match-lst (subseq (car match-lst) 0 (get-common match-lst len))))
     (match-lst ;; one element list
      (list match-lst (car match-lst)))
     (t nil)))
@@ -135,19 +170,22 @@
 
 ;; Properties list
 (defun lambda-list (name)
-  (or (get-help name)
-      (let ((sym (find-callable-symbol name)))
-        (if sym
-            (or (get-help (format nil "~a" sym))
-                (if (and (fboundp sym) (consp (symbol-function sym)))
-                    (cons sym (copy-list (cadr (symbol-function sym)))))
-                (aif (assoc :function-documentation (send sym :plist))
-                     (read-copy (cdr it) sym)))))))
+  (let ((sym (find-callable-symbol name)))
+    (if sym
+        (or (some #'get-help (list-possible-symbol-names sym))
+            (if (and (fboundp sym) (consp (symbol-function sym)))
+                (cons sym (copy-list (cadr (symbol-function sym)))))
+            (aif (assoc :function-documentation (send sym :plist))
+                 (read-copy (cdr it) sym))))))
 
-(defun method-lambda-list (obj name)
+(defun method-lambda-list (obj name &optional instance-completion-p)
+  (if (zerop (length name)) (return-from method-lambda-list nil))
   (let* ((sym (or (find-symbol (string-upcase (subseq name 1)) *keyword-package*)
                   (return-from method-lambda-list nil)))
-         (method (find-method obj sym))
+         (method (or (if instance-completion-p
+                         (aand (classp obj) (send obj :method sym) (list obj it))
+                         (find-method obj sym))
+                     (return-from method-lambda-list nil)))
          (class (car method))
          (def (second (second method)))
          (arglist (or
@@ -169,8 +207,11 @@
                           (format nil ":~a" key))))
                 (nthcdr pos arglist)))))
 
-(defun method-list (obj)
-  (let* ((class (if (classp obj) obj (class obj)))
+(defun method-list (obj &optional instance-completion-p)
+  (let* ((class (or (if instance-completion-p
+                        (and (classp obj) obj)
+                        (class obj))
+                    (return-from method-list nil)))
          (meths (mapcar #'car (send class :all-methods))))
     (mapcar #'(lambda (val) (format nil "~a" val))
             (remove-duplicates meths))))
@@ -196,22 +237,39 @@
 
 
 ;; SWANK-SIMPLE-COMPLETIONS
-(defun slime-find-symbol (start &optional prefix)
-  (multiple-value-bind (pack str) (split-package start)
-    (let ((len (length str))
-          str-lst)
-      (unless (or pack prefix)
-        (mapc #'(lambda (p) (let ((name (package-name p)))
-                              (if (and (string-equal str name :end2 len)
-                                       (> (p . intsymcount) 0))
-                                  (push (format nil "~a:" (maybe-downcase name))
-                                        str-lst))))
-              (list-all-packages)))
-      (slime-do-symbols (sym pack)
-                        (let ((sym-str (maybe-downcase (send sym :pname))))
-                          (when (string-equal str sym-str :start1 0 :end1 len :start2 0 :end2 len)
-                            (push (concatenate string prefix start (subseq sym-str len)) str-lst))))
-      (append-common (sort str-lst #'string<) len))))
+(defun slime-find-symbol (start &optional package prefix)
+  (let ((*package* (or (find-package package) *package*)))
+    (multiple-value-bind (pack str external-p) (split-package start)
+      (let ((len (length str))
+            str-lst)
+        (flet ((fill-str-lst (ext-p)
+                 (slime-do-symbols (sym pack ext-p)
+                   (let ((sym-str (maybe-downcase (send sym :pname))))
+                     (when (string-equal str sym-str :start1 0 :end1 len :start2 0 :end2 len)
+                       (push
+                        (if (and external-p (not ext-p))
+                            (concatenate string prefix (subseq start 0 (length pack)) "::" sym-str)
+                            (concatenate string prefix (subseq start 0 (- (length start) len)) sym-str))
+                        str-lst))))))
+
+          ;; add possible package names
+          (unless (or pack prefix)
+            (mapc #'(lambda (p) (let ((name (package-name p)))
+                                  (if (and (string-equal str name :end2 len)
+                                           (> (p . intsymcount) 0))
+                                      (push (format nil "~a:" (maybe-downcase name))
+                                            str-lst))))
+                  (list-all-packages)))
+
+          ;; fill completions
+          (fill-str-lst external-p)
+
+          ;; if no external symbols are found search for internal ones
+          (if (and (null str-lst) external-p)
+              (fill-str-lst nil))
+
+          ;; sort results and append common substring in the end
+          (append-common (sort str-lst #'string<) (length start)))))))
 
 
 ;; SWANK-AUTODOC
@@ -219,7 +277,7 @@
   (let ((last (car (last form))))
     (cond
       ((not (stringp last))
-       (function-autodoc name cursor form))
+       (function-autodoc name (1- cursor) form))
       ((string= last "")
        (function-autodoc name (1- cursor) (butlast form)))
       ((and (> cursor 1)
@@ -238,7 +296,8 @@
          (len (length arglist)))
     (when arglist
       (unless cursor (return-from function-autodoc arglist))
-      (dotimes (i (min len (1+ cursor)))
+      (do ((i 0 (1+ i)))
+          ((>= i (min len (1+ cursor))))  ;; evaluate every iteration
         (case (nth i arglist)
           (&rest
            (aif (position '&key arglist :start (1+ i))
@@ -252,14 +311,14 @@
           arglist
           (set-cursor arglist cursor)))))
 
-(defun method-lambda-list-from-form (form)
+(defun method-lambda-list-from-form (form &optional send/instance)
   ;; form: '("send" "obj" ":selector" ...)
   (if (and (cddr form)
-           (string-equal (first form) "send")
+           (setq send/instance (or send/instance (is-send/instance-symbol (first form))))
            (stringp (second form))
            (stringp (third form)))
       (with-callable-symbol-value (value (cadr form))
-        (method-lambda-list value (third form)))))
+        (method-lambda-list value (third form) (string= send/instance "instance")))))
 
 (defun set-cursor (lst pos)
   ;; TODO: use string not symbols
@@ -276,21 +335,25 @@
 
 
 ;; SWANK-COMPLETIONS-FOR-KEYWORD
-(defun slime-find-keyword (start &optional form)
-  (cond
-    ((null form)
-     (let ((*package* *keyword-package*))
-       (slime-find-symbol (subseq start 1) ":")))
-    ((string-equal (car form) "send")
-     (if (stringp (cadr form))
-         (with-callable-symbol-value (value (cadr form))
-           (if (cddr form)
-               (let ((keys (keyword-list (method-lambda-list-from-form form))))
-                 (find-prefix start keys 1))
-               (find-prefix start (method-list value) 1)))))
-    (t
-     (let ((keys (keyword-list (lambda-list (car form)))))
-       (find-prefix start keys 1)))))
+(defun slime-find-keyword (start &optional form package)
+  (if (zerop (length start)) (return-from slime-find-keyword nil))
+  (let ((*package* (or (find-package package) *package*)))
+    (cond
+      ((null form)
+       (slime-find-symbol (subseq start 1) *keyword-package* ":"))
+      ((setq send/instance (is-send/instance-symbol (car form)))
+       (if (stringp (cadr form))
+           ;; Always return nil if a matching callable symbol is not found
+           (with-callable-symbol-value (value (cadr form))
+             (if (cddr form)
+                 (let ((keys (keyword-list (method-lambda-list-from-form form send/instance))))
+                   (find-prefix start keys 1))
+                 (find-prefix start (method-list value (string= send/instance "instance")) 1)))
+           ;; Complete as global symbol if object is an s-expression
+           (slime-find-symbol (subseq start 1) *keyword-package* ":")))
+      (t
+       (let ((keys (keyword-list (lambda-list (car form)))))
+         (find-prefix start keys 1))))))
 
 
 ;; SWANK-COMPLETIONS-FOR-CHARACTER
@@ -307,23 +370,27 @@
 
 
 ;; SWANK-DESCRIBE-SYMBOL
-(defun slime-describe-symbol (name)
-  (let* ((sym (find-callable-symbol name))
-         (help-name (string-downcase (format nil "~a" sym))))
+(defun slime-describe-symbol (name &optional package)
+  (let* ((*package* (or (find-package package) *package*))
+         (sym (find-callable-symbol name))
+         (help-name-lst (list-possible-symbol-names sym)))
     (unless sym
       (error "symbol not found"))
     (with-output-to-string (s)
-      (when (gethash help-name help::*help-hash*)
-        (help help-name nil s)
-        (terpri s))
+      (dolist (help-name help-name-lst)
+        (when (gethash help-name help::*help-hash*)
+          (help help-name nil s)
+          (terpri s)
+          (return)))
       (format s "PROPERTIES~%~%")
       (describe sym s))))
 
 
 ;; SWANK-EXPAND-1
-(defun slime-macroexpand (form)
-  (with-output-to-string (s)
-    (pprint (macroexpand form) s)))
+(defun slime-macroexpand (form &optional package)
+  (let ((*package* (or (find-package package) *package*)))
+    (with-output-to-string (s)
+      (pprint (macroexpand (read-from-string form)) s))))
 
 
 ;; SWANK-LIST-ALL-PACKAGE-NAMES
@@ -371,8 +438,30 @@
      #'string< #'cadr)))
 
 
+;; SWANK-FIND-TAG-NAME-FOR-EMACS
+(defun find-tag-name-for-emacs (name &optional package)
+  (let ((*package* (or (find-package package) *package*)))
+    (let* ((sym (or (find-callable-symbol name)
+                    (return-from find-tag-name-for-emacs nil)))
+           (cname (get sym 'compiler::builtin-function-entry)))
+      (if cname
+          (list cname)
+          (list-possible-symbol-names sym)))))
+
 ;; SWANK-SET-PACKAGE
 (defun set-package (name)
-  (when (find-package name)
-    (in-package name)
-    (slime-prompt)))
+  (cond
+    ((null-string-p name))
+    ((find-package name)
+     (in-package name))
+    (t
+     (error "No such package: ~S" name)))
+  (or (slime-prompt)
+      (list (package-name *package*) last-prompt)))
+
+
+;; SWANK-CLEAR-REPL-VARIABLES
+(defun clear-repl-variables ()
+  (let ((variables '(*** ** * +++ ++ +)))
+    (dolist (variable variables)
+      (setf (symbol-value variable) nil))))
