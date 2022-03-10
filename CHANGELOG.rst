@@ -2,6 +2,16 @@
 Changelog for package euslime
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.1 (2022-03-10)
+------------------
+* Add recursive load tags
+* Support method description
+* Enable piped-fork function
+* Generate comp/ and geo/ tags
+* Add technical-report.md
+* Bugfix
+* Contributors: Guilherme Affonso
+
 1.1.0 (2020-09-26)
 ------------------
 * Major updates in python and toplevel
