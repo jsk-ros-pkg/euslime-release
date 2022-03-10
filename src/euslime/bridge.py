@@ -21,6 +21,7 @@ EXEC_RATE = 0.005
 DELIM = os.linesep
 REGEX_ANSI = re.compile(r'\x1b[^m]*m')
 
+
 def get_signal(signum):
     match = [v for v, k in signal.__dict__.iteritems() if k == signum]
     if match:
@@ -32,7 +33,7 @@ def no_color(msg):
 
 
 def gen_to_string(gen):
-    return ''.join([x for x in list(gen) if isinstance(x,str)])
+    return ''.join([x for x in list(gen) if isinstance(x, str)])
 
 
 class AbortEvaluation(Exception):
@@ -95,7 +96,8 @@ class Process(object):
 
     def reset(self):
         try:
-            self.exec_internal("(lisp:reset)" + self.delim, force_repl_socket=True)
+            cmd = "(lisp:reset)" + self.delim
+            self.exec_internal(cmd, force_repl_socket=True)
         except AbortEvaluation:
             pass
 
@@ -148,12 +150,15 @@ class EuslispError(Exception):
     def __init__(self, message, stack=None):
         self.stack = stack
         # capitalize() converts the rest of the string to downcase
-        message = message[0].upper() + message[1:]
+        if len(message) > 0:
+            message = message[0].upper() + message[1:]
         super(EuslispError, self).__init__(message)
+
 
 class EuslispInternalError(EuslispError):
     # Only CONTINUE option
     pass
+
 
 class EuslispFatalError(EuslispError):
     # Only RESTART option
@@ -179,7 +184,9 @@ class EuslispProcess(Process):
         self.token = '{}euslime-token-{}'.format(chr(29), port1)
 
         super(EuslispProcess, self).__init__(
-            cmd=[self.program, self.init_file, "--port1={}".format(port1), "--port2={}".format(port2)],
+            cmd=[self.program,
+                 self.init_file,
+                 "--port1={}".format(port1), "--port2={}".format(port2)],
             color=color,
             on_output=on_output,
         )
@@ -190,7 +197,8 @@ class EuslispProcess(Process):
     def start(self):
         super(EuslispProcess, self).start()
         self.euslime_connection = self._socket_connect(self.socket)
-        self.euslime_internal_connection = self._socket_connect(self.internal_socket)
+        self.euslime_internal_connection = self._socket_connect(
+            self.internal_socket)
         self.euslime_connection_lock = Lock()
         self.euslime_internal_connection_lock = Lock()
         self.input('(slime:slimetop)')
@@ -251,6 +259,7 @@ class EuslispProcess(Process):
         if command == 'read':
             return [Symbol(":read-string"), 0, 1]
         if command == 'read-mode':
+            log.debug("Entering read mode...")
             self.read_mode = True
             return [Symbol(":read-string"), 0, 1]
         if command == 'error':
@@ -274,7 +283,7 @@ class EuslispProcess(Process):
     def get_socket_result(self, connection, wait=False):
         while True:
             gen = self.get_socket_response(connection)
-            if isinstance(gen,list):
+            if isinstance(gen, list):
                 # read-string
                 yield gen
             elif gen is not None:
@@ -328,7 +337,7 @@ class EuslispProcess(Process):
         if force_repl_socket:
             # When the command must be evaluated in the main thread due to
             # e.g. Thread Special variables
-            # Locks are performed from outside to yield results before releasing
+            # Locks are performed from outside to yield results before release
             connection = self.euslime_connection
             log.info('exec_internal(repl): %s' % cmd_str)
         else:

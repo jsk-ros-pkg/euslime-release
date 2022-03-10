@@ -9,10 +9,28 @@
 
 (eval-when (load eval)
 
+;; Recursive load tags
+(defun load (fname &rest args)
+  (when slime::*load-hooks*
+    (dolist (fn slime::*load-hooks*)
+      (funcall fn fname)))
+  (apply slime::load-org-for-slime fname args))
+
 ;; Handle unix sub processes
 (defun unix:system (&optional command)
   (slime::socket-request slime::*slime-stream* "read-mode" t)
   (funcall slime::*old-unix-system-fn* command))
+
+;; Remap old *standard-input*
+;; don't compile to override the reploop reference when exec command is null
+(setf (symbol-function 'piped-fork)
+      '(lambda-closure piped-fork 0 0 (&optional (exec) &rest args)
+        (flet ((reploop (&rest reploop-args)
+                 (apply slime::*old-reploop-fn* reploop-args)))
+          (let ((*standard-input* (send slime::*old-terminal-io* :instream))
+                (*use-top-selector* nil))
+            (apply slime::*old-piped-fork-fn* exec args)))))
+
 
 ;; Recompile with new unix:system
 (defun evaluate-stream (input)

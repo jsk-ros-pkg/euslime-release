@@ -263,6 +263,98 @@ class eus(EuslimeTestCase):
              '(:write-string "\\n" :repl-result)',
              '(:return (:ok nil) 47)'])
 
+    def test_unix_system_1(self):
+        self.assertSocketPossibleResults(
+            '(:emacs-rex (swank-repl:listener-eval "(unix:system \\"pwd\\")\n") "USER" :repl-thread 8)',
+            ['(:read-string 0 1)',
+             '(:write-string "{}\\n")'.format(os.getcwd()),
+             '(:write-string "0" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:read-aborted 0 1)',
+             '(:return (:ok nil) 8)'],
+            ['(:write-string "{}\\n")'.format(os.getcwd()),
+             '(:read-string 0 1)',
+             '(:write-string "0" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:read-aborted 0 1)',
+             '(:return (:ok nil) 8)'])
+
+    def test_unix_system_2(self):
+        self.assertAsyncRequest(
+            ['(:emacs-rex (swank-repl:listener-eval "(unix:system \\"eus\\")\n") "USER" :repl-thread 6)',
+             '(:emacs-return-string 0 1 "(1+ 1)\n")',
+             '(:emacs-return-string 0 1 "(quit)\n")'],
+            ['(:read-string 0 1)',
+             '(:read-string 0 1)',
+             '(:write-string "2\\n")',
+             '(:read-string 0 1)',
+             '(:write-string "0" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:read-aborted 0 1)',
+             '(:return (:ok nil) 6)'],
+            rate_send=0.1)
+
+    def test_piped_fork_1(self):
+        self.with_unwind_protect(
+            (self.assertSocketIgnoreAddress,
+             '(:emacs-rex (swank-repl:listener-eval "(setq s (piped-fork \\"pwd\\"))\n") "USER" :repl-thread 27)',
+             '(:write-string "#<io-stream #X55db3aadc4a0>" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 27)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(read s nil)\n") "USER" :repl-thread 30)',
+             '(:write-string "{}" :repl-result)'.format(os.getcwd()),
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 30)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(read s nil)\n") "USER" :repl-thread 31)',
+             '(:write-string "nil" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 31)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(close s)\n") "USER" :repl-thread 33)',
+             '(:write-string "t" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 33)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(makunbound \'s)\n") "USER" :repl-thread 38)',
+             '(:write-string "t" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 38)'))
+
+    def test_piped_fork_2(self):
+        self.with_unwind_protect(
+            (self.assertSocketIgnoreAddress,
+             '(:emacs-rex (swank-repl:listener-eval "(setq s (piped-fork))\n") "USER" :repl-thread 27)',
+             '(:write-string "#<io-stream #X55db3aadc4a0>" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 27)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(format s \\"(1+ 1)~%\\")\n") "USER" :repl-thread 30)',
+             '(:write-string "nil" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 30)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(read s nil)~%") "USER" :repl-thread 31)',
+             '(:write-string "2" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 31)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(format s \\"(quit)~%\\")\n") "USER" :repl-thread 32)',
+             '(:write-string "nil" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 32)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(close s)\n") "USER" :repl-thread 33)',
+             '(:write-string "t" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 33)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(makunbound \'s)\n") "USER" :repl-thread 38)',
+             '(:write-string "t" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 38)'))
+
     # SIMULTANEOUS REQUESTS
     def test_async_1(self):
         self.assertAsyncRequest(
@@ -295,7 +387,7 @@ class eus(EuslimeTestCase):
              '(:write-string "start\\n")',
              '(:write-string "end\\n")',
              '(:write-string "Loaded.\\n")',
-             '(:return (:ok t) 9)'])
+             '(:return (:ok ("{}/test_async_3.l")) 9)'.format(os.getcwd())])
 
     def test_async_4(self):
         self.with_unwind_protect(
@@ -1477,8 +1569,22 @@ class eus(EuslimeTestCase):
         self.with_unwind_protect(
             (self.assertSocketPossibleResults,
              '(:emacs-rex (swank-repl:listener-eval "(quit)\n") "USER" :repl-thread 5)',
+
+             # eus irteusgl
              ['(:debug 0 1 ("Process exited with code 0 (SIG_DFL)" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
-             ['(:debug 0 1 ("Socket connection closed" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))']),
+             ['(:debug 0 1 ("Socket connection closed" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
+
+             # roseus
+             ['(:write-string "[ INFO]: cell* ROSEUS_EXIT(context*, int, cell**)\\n")',
+              '(:debug 0 1 ("Process exited with code 0 (SIG_DFL)" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
+             ['(:write-string "[ INFO]: cell* ROSEUS_EXIT(context*, int, cell**)\\n")',
+              '(:debug 0 1 ("Socket connection closed" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
+
+             # roseus_color
+             ['(:write-string "\x1b[0m[ INFO]: cell* ROSEUS_EXIT(context*, int, cell**)\x1b[0m\\n")',
+              '(:debug 0 1 ("Process exited with code 0 (SIG_DFL)" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
+             ['(:write-string "\x1b[0m[ INFO]: cell* ROSEUS_EXIT(context*, int, cell**)\x1b[0m\\n")',
+              '(:debug 0 1 ("Socket connection closed" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))']),
             (self.assertSocketPossibleResults,
              '(:emacs-rex (swank:invoke-nth-restart-for-emacs 1 0) "USER" 0 6)',
              ['(:return (:abort nil) 6)',
@@ -1494,8 +1600,22 @@ class eus(EuslimeTestCase):
         self.with_unwind_protect(
             (self.assertSocketPossibleResults,
              '(:emacs-rex (swank-repl:listener-eval "(exit -1)\n") "USER" :repl-thread 10)',
+
+             # eus irteusgl
              ['(:debug 0 1 ("Process exited with code 255" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
-             ['(:debug 0 1 ("Socket connection closed" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))']),
+             ['(:debug 0 1 ("Socket connection closed" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
+
+             # roseus
+             ['(:write-string "[ INFO]: cell* ROSEUS_EXIT(context*, int, cell**)\\n")',
+              '(:debug 0 1 ("Process exited with code 255" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
+             ['(:write-string "[ INFO]: cell* ROSEUS_EXIT(context*, int, cell**)\\n")',
+              '(:debug 0 1 ("Socket connection closed" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
+
+             # roseus_color
+             ['(:write-string "\x1b[0m[ INFO]: cell* ROSEUS_EXIT(context*, int, cell**)\x1b[0m\\n")',
+              '(:debug 0 1 ("Process exited with code 255" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))'],
+             ['(:write-string "\x1b[0m[ INFO]: cell* ROSEUS_EXIT(context*, int, cell**)\x1b[0m\\n")',
+              '(:debug 0 1 ("Socket connection closed" "" nil) (("RESTART" "Restart euslisp process")) nil (nil))']),
             (self.assertSocketPossibleResults,
              '(:emacs-rex (swank:invoke-nth-restart-for-emacs 1 0) "USER" 0 11)',
              ['(:return (:abort nil) 11)',
@@ -1559,7 +1679,7 @@ class eus(EuslimeTestCase):
               '(:emacs-return-string 0 1 "(1+ 1)\n")',
               '(:emacs-return-string 0 1 "(reset)\n")'],
              ['(:write-string ";; Segmentation Fault.\\n;; in ")',
-              '(:write-string "(1+ (and))\\n;; You are still in a signal handler.\\n;;Try reset or throw to upper level as soon as possible.\\n;; code=782681776 x=2ea6c580 addr=0\\n")',
+              '(:write-string "(1+ (and))\\n;; You are still in a signal handler.\\n;;Try reset or throw to upper level as soon as possible.\\n;; code=782681776 x=2ea6c580 addr=\\n")',
               '(:read-string 0 1)',
               '(:read-string 0 1)',
               '(:write-string "signal=11 to thread 0, \\n")',
@@ -1592,7 +1712,7 @@ class eus(EuslimeTestCase):
              ['(:emacs-rex (swank-repl:listener-eval "(1+ (and))\n") "USER" :repl-thread 6)',
               '(:emacs-return-string 0 1 "(list 1 2 3)\n")',
               '(:emacs-return-string 0 1 "reset\n")'],
-             ['(:write-string ";; Segmentation Fault.\\n;; in (1+ (and))\\n;; You are still in a signal handler.\\n;;Try reset or throw to upper level as soon as possible.\\n;; code=-107578960 x=f9967880 addr=0\\n")',
+             ['(:write-string ";; Segmentation Fault.\\n;; in (1+ (and))\\n;; You are still in a signal handler.\\n;;Try reset or throw to upper level as soon as possible.\\n;; code=-107578960 x=f9967880 addr=\\n")',
               '(:read-string 0 1)',
               '(:read-string 0 1)',
               '(:write-string "signal=11 to thread 0, \\n(1 2 3)\\n")',
@@ -1633,7 +1753,7 @@ class eus(EuslimeTestCase):
                 ['(:emacs-rex (swank-repl:listener-eval "(1+ (and))\n") "USER" :repl-thread 5)',
                  '(:emacs-interrupt 0)'],
                 ['(:write-string ";; Segmentation Fault.\\n;; in ")',
-                 '(:write-string "(1+ (and))\\n;; You are still in a signal handler.\\n;;Try reset or throw to upper level as soon as possible.\\n;; code=1614907632 x=604187c0 addr=0\\n")',
+                 '(:write-string "(1+ (and))\\n;; You are still in a signal handler.\\n;;Try reset or throw to upper level as soon as possible.\\n;; code=1614907632 x=604187c0 addr=\\n")',
                  '(:read-string 0 1)',
                  '(:read-aborted 0 1)',
                  '(:read-aborted 0 1)',
@@ -1875,6 +1995,11 @@ class eus(EuslimeTestCase):
              '(:debug-return 0 1 nil)',
              '(:return (:abort "\'Symbol not found\'") 22)'))
 
+    def test_describe_7(self):
+        self.assertSocketIgnoreAddress(
+            '(:emacs-rex (swank:describe-symbol ":slots") "USER" :repl-thread 5)',
+            '(:return (:ok "-- OBJECT --\\n\\nNAME\\n     :slots\\nTYPE\\n     method\\nCLASS\\n     object \\nSYNOPSIS\\n     :slots  \\nDESCRIPTION\\n     returns the list of variable-name and value pair of all the slots of the object. You can get the value of a specific slot by applying \x1b[1massoc\x1b[m to this list, although you cannot alter them. \\n\\n-- METACLASS --\\n\\nNAME\\n     :slots\\nTYPE\\n     method\\nCLASS\\n     metaclass \\nSYNOPSIS\\n     :slots  \\nDESCRIPTION\\n     returns the slot-name vector. \\n\\nPROPERTIES\\n\\nplist=((:method-documentation\\n        (#<metaclass metaclass> . \\"(self class)\\")\\n        (#<metaclass object> . \\"(self class)\\"))\\n       (:class #<metaclass metaclass> #<metaclass object>))\\nvalue=:slots\\nvtype=0\\nfunction=*unbound*\\npname=\\"SLOTS\\"\\nhomepkg=#<package KEYWORD>\\n") 5)')
+
     # LOAD FILE
     def test_load_file_1(self):
         self.with_unwind_protect(
@@ -1882,7 +2007,7 @@ class eus(EuslimeTestCase):
              '(:emacs-rex (swank:load-file "{}/test_load_file_1.l") "USER" :repl-thread 6)'.format(os.getcwd()),
              '(:write-string "Loading file: {}/test_load_file_1.l ...\\n")'.format(os.getcwd()),
              '(:write-string "Loaded.\\n")',
-             '(:return (:ok t) 6)'),
+             '(:return (:ok ("{}/test_load_file_1.l")) 6)'.format(os.getcwd())),
             (self.assertSocket,
              '(:emacs-rex (swank-repl:listener-eval "(and (boundp \'test-load-var) test-load-var)\n") "USER" :repl-thread 11)',
              '(:write-string "10" :repl-result)',
@@ -1905,7 +2030,7 @@ class eus(EuslimeTestCase):
              '(:emacs-rex (swank:load-file "/tmp/test_load_file_1.so") "USER" :repl-thread 6)',
              '(:write-string "Loading file: /tmp/test_load_file_1.so ...\\n")',
              '(:write-string "Loaded.\\n")',
-             '(:return (:ok t) 6)'),
+             '(:return (:ok ("/tmp/test_load_file_1.so")) 6)'),
             (self.assertSocket,
              '(:emacs-rex (swank-repl:listener-eval "(and (boundp \'test-load-var) test-load-var)\n") "USER" :repl-thread 11)',
              '(:write-string "10" :repl-result)',
@@ -1926,12 +2051,50 @@ class eus(EuslimeTestCase):
             (self.assertSocketIgnoreAddress,
              '(:emacs-rex (swank:load-file "{0}") "USER" :repl-thread 6)'.format(file),
              '(:write-string "Loading file: {0} ...\\n")'.format(file),
-             '(:debug 0 1 ("File #P\\"{0}\\" not found in (load \\"{0}\\")" "" nil) (("QUIT" "Quit to the SLIME top level") ("CONTINUE" "Ignore the error and continue in the same stack level") ("RESTART" "Restart euslisp process")) ((0 "(load \\"{0}\\")" (:restartable nil)) (1 "(slime:slimetop)" (:restartable nil)) (2 "(slime:slimetop)" (:restartable nil)) (3 "#<compiled-code #X48c80f0>" (:restartable nil))) (nil))'.format(file)),
+             '(:debug 0 1 ("File #P\\"{0}\\" not found in (slime::load-file-and-tags \\"{0}\\")" "" nil) (("QUIT" "Quit to the SLIME top level") ("CONTINUE" "Ignore the error and continue in the same stack level") ("RESTART" "Restart euslisp process")) ((0 "(slime::load-file-and-tags \\"{0}\\")" (:restartable nil)) (1 "(slime::load-file-and-tags \\"{0}\\")" (:restartable nil)) (2 "(slime:slimetop)" (:restartable nil)) (3 "(slime:slimetop)" (:restartable nil)) (4 "#<compiled-code #X48c80f0>" (:restartable nil))) (nil))'.format(file)),
             (self.assertSocket,
              '(:emacs-rex (swank:invoke-nth-restart-for-emacs 1 0) "USER" 0 7)',
              '(:return (:abort nil) 7)',
              '(:debug-return 0 1 nil)',
              '(:return (:abort "\'File #P\\"{0}\\" not found\'") 6)'.format(file)))
+
+    def test_load_file_4(self):
+        # test recursive loading
+        self.with_unwind_protect(
+            (self.assertSocket,
+             '(:emacs-rex (swank:load-file "{}/test_load_file_4.l") "USER" :repl-thread 6)'.format(os.getcwd()),
+             '(:write-string "Loading file: {}/test_load_file_4.l ...\\n")'.format(os.getcwd()),
+             '(:write-string "Loaded.\\n")',
+             '(:return (:ok ("{0}/test_load_file_4.l" "{0}/test_load_file_1.l")) 6)'.format(os.getcwd())),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(and (boundp \'test-load-var) test-load-var)\n") "USER" :repl-thread 11)',
+             '(:write-string "10" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 11)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(makunbound \'test-load-var)\n") "USER" :repl-thread 13)',
+             '(:write-string "t" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 13)'))
+
+    def test_load_file_5(self):
+        # test loading without the implicit ".l"
+        self.with_unwind_protect(
+            (self.assertSocket,
+             '(:emacs-rex (swank:load-file "{}/test_load_file_4") "USER" :repl-thread 6)'.format(os.getcwd()),
+             '(:write-string "Loading file: {}/test_load_file_4 ...\\n")'.format(os.getcwd()),
+             '(:write-string "Loaded.\\n")',
+             '(:return (:ok ("{0}/test_load_file_4.l" "{0}/test_load_file_1.l")) 6)'.format(os.getcwd())),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(and (boundp \'test-load-var) test-load-var)\n") "USER" :repl-thread 11)',
+             '(:write-string "10" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 11)'),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(makunbound \'test-load-var)\n") "USER" :repl-thread 13)',
+             '(:write-string "t" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 13)'))
 
     # MACRO EXPAND
     def test_macro_expand_1(self):
@@ -1983,7 +2146,7 @@ class eus(EuslimeTestCase):
     def test_macro_expand_4(self):
         self.assertSocket(
             '(:emacs-rex (swank:swank-expand-1 "(unless t\n       (print \\"HERE\\"))") "USER" :repl-thread 10)',
-            '(:return (:ok "(if (not t) (progn (print \\"HERE\\")))\\n") 10)')
+            '(:return (:ok "(when (not t) (print \\"HERE\\"))\\n") 10)')
 
     # ENCODING
     def test_encoding_1(self):
@@ -2004,7 +2167,7 @@ class eus(EuslimeTestCase):
     def test_encoding_3(self):
         self.assertSocket(
             '(:emacs-rex (swank:swank-expand-1 "(unless t\n\t(print \\"\xe3\x81\x82\xe3\x81\x82\xe3\x81\x82\\"))") "USER" :repl-thread 8)',
-            '(:return (:ok "(if (not t) (progn (print \\"\xe3\x81\x82\xe3\x81\x82\xe3\x81\x82\\")))\\n") 8)')
+            '(:return (:ok "(when (not t) (print \\"\xe3\x81\x82\xe3\x81\x82\xe3\x81\x82\\"))\\n") 8)')
 
     # DEFAULT-DIRECTORY
     def test_default_directory_1(self):

@@ -1,6 +1,15 @@
 (unless (find-package "SLIME") (make-package "SLIME"))
 (in-package "SLIME")
 
+
+;;;;;;;;;;;;;;;;;;;;;;
+;; Recursive Load Tags
+;;;;;;;;;;;;;;;;;;;;;;
+
+(defvar *load-hooks* nil)
+(defvar load-org-for-slime (symbol-function 'load))
+
+
 ;;;;;;;;;;;;;;;;;;;;
 ;; Socket Connection
 ;;;;;;;;;;;;;;;;;;;;
@@ -22,6 +31,8 @@
 (defvar *slime-input-stream*)
 (defvar *old-terminal-io* *terminal-io*)
 (defvar *old-unix-system-fn* #'unix::system)
+(defvar *old-piped-fork-fn* #'piped-fork)
+(defvar *old-reploop-fn* #'reploop)
 
 (defun slime-connect-socket (port)
   (flet ((try-connect (&optional (timeout 5))

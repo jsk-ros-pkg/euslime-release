@@ -34,6 +34,27 @@
 	((null (cdr args)) (car args))
 	(t `(aif ,(car args) (aand ,@(cdr args))))))
 
+;; File related
+(defun true-filename (fname)
+  (labels ((check-file (name)
+             (if (eql (probe-file name) :file) name))
+           (check-name (name)
+             (or (check-file name)
+                 (check-file (namestring (merge-pathnames ".l" name))))))
+    (cond
+      ((and (stringp fname) (substringp "package://" fname))
+       ;; avoid using package notation to be safe for other eus executables
+       (unless (find-package "ROS") (error "no such package ROS"))
+       (check-name (funcall (find-symbol "RESOLVE-ROS-PATH" "ROS") fname)))
+      ((aand (pathname-directory (pathname fname))
+             (eql (car it) :root))
+       (check-name (namestring fname)))
+      (t
+       (dolist (p (union *loader-current-directory* *load-path*
+                         :test #'string=))
+         (aif (check-name (concatenate-pathnames p fname))
+              (return-from true-filename (namestring it))))))))
+
 ;; Symbol related
 (defun split-package (name)
   ;; TODO: read |escaped\|forms|
@@ -167,6 +188,13 @@
                 (read-item it))
           (aand (gethash name help::*help-hash*)
                 (read-item it))))))
+
+(defun get-help-method-list (name)
+  (let (acc)
+    (dotimes (i (length help::*method-list*))
+      (aif (gethash name (nth i help::*method-list*))
+          (push (help::help-item-clas it) acc)))
+    acc))
 
 ;; Properties list
 (defun lambda-list (name)
@@ -381,7 +409,13 @@
         (when (gethash help-name help::*help-hash*)
           (help help-name nil s)
           (terpri s)
-          (return)))
+          (return))
+        (dolist (mthd (get-help-method-list help-name))
+          (when (aand (gethash mthd help::*help-hash*)
+                      (gethash help-name (help::help-item-mhash it)))
+            (format s "-- ~A --~%~%" (string-upcase mthd))
+            (help help-name mthd s)
+            (terpri s))))
       (format s "PROPERTIES~%~%")
       (describe sym s))))
 
@@ -390,7 +424,7 @@
 (defun slime-macroexpand (form &optional package)
   (let ((*package* (or (find-package package) *package*)))
     (with-output-to-string (s)
-      (pprint (macroexpand (read-from-string form)) s))))
+      (pprint (macroexpand2 (read-from-string form)) s))))
 
 
 ;; SWANK-LIST-ALL-PACKAGE-NAMES
@@ -447,6 +481,14 @@
       (if cname
           (list cname)
           (list-possible-symbol-names sym)))))
+
+;; SWANK-LOAD-FILE-AND-TAGS
+(defun load-file-and-tags (filename)
+  (let* ((acc nil)
+         (hook-fn #'(lambda (name) (aif (true-filename name) (push it acc))))
+         (*load-hooks* (cons hook-fn *load-hooks*)))
+    (load filename)
+    (nreverse acc)))
 
 ;; SWANK-SET-PACKAGE
 (defun set-package (name)
