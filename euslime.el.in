@@ -24,8 +24,8 @@
 
 ;;; Code:
 
-(add-to-list 'load-path "/opt/ros/melodic/share/emacs/site-lisp")
-(add-to-list 'load-path "/opt/ros/melodic/share/emacs/site-lisp/slime")
+(add-to-list 'load-path "/opt/ros/$ENV{ROS_DISTRO}/share/emacs/site-lisp")
+(add-to-list 'load-path "/opt/ros/$ENV{ROS_DISTRO}/share/emacs/site-lisp/slime")
 (add-to-list 'load-path "${CMAKE_INSTALL_PREFIX}/${CATKIN_PACKAGE_SHARE_DESTINATION}/slime-repl-ansi-color")
 (require 'rosemacs)
 (require 'slime-autoloads)
@@ -64,8 +64,70 @@
   (sleep-for 0.1)
   (slime-repl-set-package ""))
 
+;; LOAD FILE
+(defcustom euslime-file-completion-function 'completing-read
+  "The completion function to be used for EusLisp file completion"
+  :type 'function)
+
+(setq euslime-file-completor
+  (lambda (str pred action)
+    (let* ((ros-file-prefix "package://")
+           (pos (string-match-p ros-file-prefix str)))
+      (if pos
+          (let* ((inhibit-message t)  ;; avoid unwanted advertising
+                 (ros-str (substring str (+ pos (length ros-file-prefix))))
+                 (res (funcall ros-package-completor ros-str pred action)))
+            (if (stringp res)
+                (concat ros-file-prefix res)
+              res))
+        (funcall 'read-file-name-internal str pred action)))))
+
+(defun euslime-read-euslisp-file-name (prompt &optional predicate require-match initial &rest args)
+  (apply euslime-file-completion-function
+         prompt euslime-file-completor
+         predicate require-match initial
+         args))
+
+(defun euslime-load-file-and-tags-with-transcript (filename)
+  (slime-repl-add-to-input-history
+   (prin1-to-string `(slime::load-file-and-tags ,filename)))
+  (run-hooks 'slime-transcript-start-hook)
+  (slime-rex () (`(swank:load-file ,filename))
+    ((:ok value)
+     (run-hooks 'slime-transcript-stop-hook)
+     (when (consp value)
+       (let ((inhibit-message t))
+         (dolist (val value)
+           (euslime-load-tags val))))
+     (slime-display-eval-result t))
+    ((:abort condition)
+     (run-hooks 'slime-transcript-stop-hook)
+     (message "Evaluation aborted on %s." condition))))
+
+(defun euslime-load-file (filename)
+  "Load the EusLisp file FILENAME."
+  (interactive (list
+                (euslime-read-euslisp-file-name
+                 "Load file: " nil nil
+                 (if (buffer-file-name) (buffer-file-name)))))
+  (euslime-load-file-and-tags-with-transcript filename))
+
+
 ;; SHORTCUT COMMANDS
-;; Overrite to inherit the buffer-local `slime-repl-shortcut-table'
+;; Override to load tags as well
+(defslime-repl-shortcut slime-repl-compile-and-load ("compile-and-load" "load" "cl")
+  (:handler (lambda (filename)
+              (interactive (list (euslime-read-euslisp-file-name "Load file: ")))
+              (slime-save-some-lisp-buffers)
+              (if slime-euslisp-mode
+                  (euslime-load-file-and-tags-with-transcript filename)
+                (slime-repl-shortcut-eval-async
+                 `(swank:compile-file-if-needed
+                   ,(slime-to-lisp-filename filename) t)
+                 #'slime-compilation-finished))))
+  (:one-liner "Compile (if neccessary) and load a lisp file."))
+
+;; Override to inherit the buffer-local `slime-repl-shortcut-table'
 (defun slime-list-repl-short-cuts ()
   (interactive)
   (let ((mode (if slime-euslisp-mode 'slime-euslisp-mode)))
@@ -210,6 +272,14 @@ current buffer."
                         ;; (recenter -1)
                         ))))))))
 
+;; Use `eulsime-load-file' on slime-mode when connected to euslisp
+(add-hook 'slime-connected-hook
+          (lambda ()
+            (let ((conn (slime-current-connection)))
+              (if (equal "euslisp" (ignore-errors (slime-connection-name conn)))
+                  (define-key slime-mode-map (concat (kbd "C-c") (kbd "C-l"))
+                    'euslime-load-file)))))
+
 ;; DEFINE MINOR MODE
 (defun slime-euslisp--doc-map-prefix ()
   (concat
@@ -221,7 +291,8 @@ current buffer."
   :lighter " eus"
   :keymap (let ((prefix (slime-euslisp--doc-map-prefix)))
             `((,(concat prefix (kbd "C-p")) . slime-apropos-symbol-package)
-              (,(concat prefix "p") . slime-apropos-symbol-package)))
+              (,(concat prefix "p") . slime-apropos-symbol-package)
+              (,(concat (kbd "C-c") (kbd "C-l")) . euslime-load-file)))
               ;; (,(kbd "M-,") . tags-loop-continue)
               ;; (,(kbd "M-.") . find-tag)))
   ;; Use simple-completions rather than fuzzy-completions
@@ -230,6 +301,8 @@ current buffer."
   (setq-local slime-complete-symbol*-fancy nil)
   ;; Remove unsupported ASDF commands
   (setq-local slime-repl-shortcut-table (remove-asdf-system-shortcuts))
+  ;; Inhibit queries when tags change
+  (setq tags-revert-without-query t)
   ;; Keep history record in a different file
   (setq-local slime-repl-history-file "~/.euslime-history.eld")
   (slime-repl-safe-load-history)
