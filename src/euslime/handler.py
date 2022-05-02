@@ -5,6 +5,7 @@ import platform
 import re
 import signal
 import traceback
+import time
 from sexpdata import dumps, loads, Symbol, Quoted
 from threading import Event
 
@@ -63,6 +64,14 @@ def dumps_lisp(s):
 def dumps_vec(s):
     # Fix vector notation, which is not well supported by sexpdata
     return REGEX_LISP_VECTOR.sub(r' \1(', dumps(s))
+
+
+def check_lock(lock, timeout):
+    # lock.acquire(timeout=timeout) available from python3
+    start = time.time()
+    while lock.locked() and (time.time() - start) < timeout:
+        time.sleep(0.01)
+    return not lock.locked()
 
 
 class DebuggerHandler(object):
@@ -152,12 +161,15 @@ class EuslimeHandler(object):
 
     def _emacs_return_string(self, process, count, msg):
         self.euslisp.input(msg)
+        if self.euslisp.read_busy:
+            log.debug("Exitting read mode...")
+            self.euslisp.read_busy = False
         if len(msg) % 128 == 0:
             # communicate when the message ends exactly at buffer end
             cmd = '(send slime::*slime-input-stream* :set-flag)'
             self.euslisp.exec_internal(cmd)
         if self.euslisp.read_mode:
-            yield [Symbol(":read-string"), 0, 1]
+            yield [Symbol(":read-string"), process, 1]
 
     def _emacs_interrupt(self, process):
         if self.euslisp.read_mode:
@@ -168,6 +180,7 @@ class EuslimeHandler(object):
             self.euslisp.process.send_signal(signal.SIGINT)
         if isinstance(process, int):
             # during a :read-string call
+            self.euslisp.read_busy = False
             yield [Symbol(":read-aborted"), process, 1]
 
     def swank_connection_info(self):
@@ -200,10 +213,17 @@ class EuslimeHandler(object):
         yield EuslispResult(res)
 
     def swank_create_repl(self, sexp):
+        lock = self.euslisp.euslime_connection_lock
+        log.debug('Acquiring lock: %s' % lock)
+        lock.acquire()
         cmd = '(slime::slime-prompt)'
-        res = self.euslisp.exec_internal(cmd, force_repl_socket=True)
-        self.euslisp.accumulate_output = False
-        yield EuslispResult(res)
+        try:
+            res = self.euslisp.exec_internal(cmd, force_repl_socket=True)
+            self.euslisp.accumulate_output = False
+            yield EuslispResult(res)
+        finally:
+            if lock.locked():
+                lock.release()
 
     def swank_repl_create_repl(self, *sexp):
         return self.swank_create_repl(sexp)
@@ -227,9 +247,10 @@ class EuslimeHandler(object):
                            Symbol(":repl-result")]
                 else:
                     yield val
-            if self.euslisp.read_mode:
+            if self.euslisp.read_mode or self.euslisp.read_busy:
                 log.debug("Aborting read mode...")
                 self.euslisp.read_mode = False
+                self.euslisp.read_busy = False
                 yield [Symbol(":read-aborted"), 0, 1]
             for val in self.maybe_new_prompt():
                 yield val
@@ -251,9 +272,10 @@ class EuslimeHandler(object):
                 yield EuslispResult(None)
         except Exception as e:
             log.error(traceback.format_exc())
-            if self.euslisp.read_mode:
+            if self.euslisp.read_mode or self.euslisp.read_busy:
                 log.debug("Aborting read mode...")
                 self.euslisp.read_mode = False
+                self.euslisp.read_busy = False
                 yield [Symbol(":read-aborted"), 0, 1]
             if lock.locked():
                 lock.release()
@@ -287,6 +309,12 @@ class EuslimeHandler(object):
      (prompt quicklisp-client:*quickload-prompt*) explain &allow-other-keys)"
    t))
  19)
+
+  from swank-arglists.lisp:
+Return a list of two elements.
+First, a string representing the arglist for the deepest subform in
+RAW-FORM that does have an arglist.
+Second, a boolean value telling whether the returned string can be cached.
         """
         try:
             sexp = unquote(sexp)
@@ -347,14 +375,32 @@ class EuslimeHandler(object):
                 scope = scope[:-1]  # remove marker
                 if scope[-1] in ['', u'']:  # remove null string
                     scope = scope[:-1]
-
         else:
             scope = None
+
+        # Try to eval from repl_socket to cope with thread special symbols
+        lock = self.euslisp.euslime_connection_lock
+        force_repl = True
+
+        # But use internal_socket when repl is not available
+        if lock.locked():
+            log.warning('Euslisp process is busy! ' +
+                        'Calculating completions on internal process instead')
+            lock = self.euslisp.euslime_internal_connection_lock
+            force_repl = False
+        else:
+            log.debug('Acquiring lock: %s' % lock)
+            lock.acquire()
+
         cmd = '(slime::slime-find-keyword "{}" (lisp:quote {}) "{}")'.format(
             qstr(start), dumps_lisp(scope), qstr(self.package))
-        # Eval from repl_socket to cope with thread special symbols
-        result = self.euslisp.exec_internal(cmd, force_repl_socket=True)
-        yield EuslispResult(result)
+        try:
+            result = self.euslisp.exec_internal(
+                cmd, force_repl_socket=force_repl)
+            yield EuslispResult(result)
+        finally:
+            if force_repl and lock.locked():
+                lock.release()
 
     def swank_completions_for_character(self, start):
         cmd = '(slime::slime-find-character "{0}")'.format(qstr(start))
@@ -592,16 +638,21 @@ class EuslimeHandler(object):
     def swank_repl_clear_repl_variables(self):
         lock = self.euslisp.euslime_connection_lock
         log.debug('Acquiring lock: %s' % lock)
+
+        if lock.locked():
+            log.error('Could not acquire lock: %s' % lock)
+            yield EuslispResult("'Process busy'", response_type='abort')
+            return
+
         lock.acquire()
         try:
             cmd = '(slime::clear-repl-variables)'
             res = self.euslisp.exec_internal(cmd, force_repl_socket=True)
             yield EuslispResult(res)
             lock.release()
-        except Exception:
+        finally:
             if lock.locked():
                 lock.release()
-            raise
 
     def swank_clear_repl_results(self):
         return
@@ -609,16 +660,31 @@ class EuslimeHandler(object):
     def swank_set_package(self, name):
         lock = self.euslisp.euslime_connection_lock
         log.debug('Acquiring lock: %s' % lock)
+
+        if not check_lock(lock, 0.5):
+            log.error('Could not acquire lock: %s' % lock)
+            yield [Symbol(":write-string"),
+                   "; No responses from inferior process\n"]
+            yield EuslispResult(False, response_type='abort')
+            return
+
         lock.acquire()
         try:
             cmd = '(slime::set-package "{0}")'.format(qstr(name))
             res = self.euslisp.exec_internal(cmd, force_repl_socket=True)
             yield EuslispResult(res)
-            lock.release()
-        except Exception:
+        except AbortEvaluation:
+            # the abort signal sometimes comes earlier than the
+            # evaluation result, for example when attaching a gdb
+            # instance and passing a SIGINT.
+            # Retry the evaluation in such cases
+            log.info('AbortEvaluation received during swank_set_package.' +
+                     ' Retrying...')
+            res = self.euslisp.exec_internal(cmd, force_repl_socket=True)
+            yield EuslispResult(res)
+        finally:
             if lock.locked():
                 lock.release()
-            raise
 
     def swank_default_directory(self):
         cmd = '(lisp:pwd)'
