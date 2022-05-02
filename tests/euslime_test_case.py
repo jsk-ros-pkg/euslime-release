@@ -14,7 +14,8 @@ from threading import Thread
 
 HEADER_LENGTH = 6
 REGEX_ADDR = re.compile(r' #X[0-9a-f]*')
-REGEX_C_ADDR = re.compile(r'-?[0-9a-f]{6,10}')
+REGEX_C_ADDR = re.compile(r'-?[0-9a-f]{6,12}')
+REGEX_GENSYM = re.compile(r'#:[^ )]*')
 
 log = get_logger(__name__)
 
@@ -160,6 +161,7 @@ class EuslimeTestCase(unittest.TestCase):
                 else:
                     fn(*args)
             except AssertionError as e:
+                # print(traceback.format_exc())
                 traceback.print_exception(type(e), e, None)
                 if error is None:
                     error = e
@@ -195,7 +197,9 @@ class EuslimeTestCase(unittest.TestCase):
 
     def assertSocketIgnoreAddress(self, req, *res):
         def substitute_address(lst):
-            return [REGEX_ADDR.sub(str(), msg) for msg in lst]
+            lst = [REGEX_ADDR.sub(str(), msg) for msg in lst]
+            lst = [REGEX_GENSYM.sub('#:g0', msg) for msg in lst]
+            return lst
         res = substitute_address(res)
         response = self.socket_get_response(req)
         response = substitute_address(response)
@@ -205,6 +209,7 @@ class EuslimeTestCase(unittest.TestCase):
 
     def assertAsyncRequest(self, req_list, res_list, rate_send=0.05,
                            ignore_address=False, ignore_c_address=False,
+                           ignore_gensym=False,
                            unordered_output=False):
         handshake_list = []
         response = []
@@ -227,6 +232,9 @@ class EuslimeTestCase(unittest.TestCase):
         if ignore_c_address:
             res_list = [REGEX_C_ADDR.sub(str(), msg) for msg in res_list]
             response = [REGEX_C_ADDR.sub(str(), msg) for msg in response]
+        if ignore_gensym:
+            res_list = [REGEX_GENSYM.sub('#:g0', msg) for msg in res_list]
+            response = [REGEX_GENSYM.sub('#:g0', msg) for msg in response]
         if unordered_output:
             def split_out(lst):
                 out = []

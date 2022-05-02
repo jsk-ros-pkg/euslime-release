@@ -37,7 +37,7 @@
   "Path to Euslisp SLIME compiled files."
   :type 'string)
 
-(defcustom euslime-match-function 'tag-implicit-name-match-p
+(defcustom euslime-match-function 'euslime-tag-implicit-name-match-p
   "Match function passed to `euslime-find-definitions' for finding a tag."
   :type 'symbol)
 
@@ -96,7 +96,8 @@
                    "LISP"))
           nil file)))
 
-    (let* ((loader (expand-file-name "slime-loader.l" euslime-compile-path))
+    (let* ((euslime-compile-path (file-name-as-directory (expand-file-name euslime-compile-path)))
+           (loader (expand-file-name "slime-loader.l" euslime-compile-path))
            (files (cl-mapcan #'needs-compile
                     (list "slime-util" "slime-connection" "slime-roseus" "slime-toplevel")))
            (res (apply #'euslime-compile-files files)))
@@ -194,11 +195,20 @@
     (re-search-backward "\n\\(\(defmethod [^\n\t ]*\\)[ \t]*\177[0-9]*,[0-9]*\n")
     (buffer-substring (match-beginning 1) (match-end 1))))
 
+(defun euslime-tag-implicit-name-match-p (tag)
+  ;; Allow to end with = (e.g. v=, eps=)
+  (and (string-match "^[^ \t(),;]+$" tag) ;rule #1
+       ;; Rules #2 and #4, and a check that there's no explicit name.
+       (looking-at "[ \t()=,;]?\177\\(?:[0-9]+\\)?,\\(?:[0-9]+\\)?$")
+       (save-excursion
+	 (backward-char (1+ (length tag)))
+	 (looking-at "[\n \t()=,;]"))))	;rule #3
+
 (defun euslime-find-definitions (name &rest other-names)
   ;; e.g. (euslime-find-definitions "simple-action-server" "ros::simple-action-server")
   (let ((first-table t)
         result)
-    (flet ((etag>xref (file tag-info)
+    (cl-flet ((etag>xref (file tag-info)
              `(,(concat
                  (if (string-match-p "(:" (car tag-info)) ;; class method
                      ;; ignore-errors ?
