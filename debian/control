@@ -1,0 +1,12 @@
+Source: ros-noetic-euslime
+Section: misc
+Priority: optional
+Maintainer: Guilherme de Campos Affonso <affonso@jsk.imi.i.u-tokyo.ac.jp>
+Build-Depends: debhelper (>= 9.0.0), ros-noetic-catkin, ros-noetic-catkin-virtualenv
+Homepage: 
+Standards-Version: 3.9.2
+
+Package: ros-noetic-euslime
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-noetic-roseus, ros-noetic-slime-ros
+Description: EusLisp meets SLIME
