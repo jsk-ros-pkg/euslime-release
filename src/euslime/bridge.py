@@ -53,6 +53,7 @@ class Process(object):
         self.delim = delim or DELIM
         self.output = []
         self.read_mode = False
+        self.read_busy = False
         self.accumulate_output = False
         self.finished_output = Event()
         self.process = None
@@ -216,36 +217,37 @@ class EuslispProcess(Process):
         log.info("...Connected to euslime socket!")
         return conn
 
-    def recv_socket_length(self, connection, hex_len):
-        if hex_len == str():
-            # recv() returns null string on EOF
-            raise EuslispFatalError('Socket connection closed')
-        length = int(hex_len, 16)
+    def recv_socket_length(self, connection, length, *flags):
         while length > 0:
-            msg = connection.recv(length)
+            msg = connection.recv(length, *flags)
+            if not msg:
+                # recv() returns null string on EOF
+                raise EuslispFatalError('Socket connection closed')
             log.debug("Socket Response: %s" % msg)
             length -= len(msg)
             yield msg
         return
 
+    def recv_socket_next(self, connection, wait=True):
+        while True:
+            try:
+                head_data = gen_to_string(self.recv_socket_length(
+                    connection, HEADER_LENGTH, socket.MSG_DONTWAIT))
+                hex_len = int(head_data, 16)
+                return self.recv_socket_length(connection, hex_len)
+            except socket.error:
+                if not wait:
+                    return
+                time.sleep(self.rate)
+                self.check_poll()
+                continue
+
     def recv_socket_data(self, connection, wait=True):
-        def recv_next(wait=True):
-            while True:
-                try:
-                    head_data = connection.recv(
-                        HEADER_LENGTH, socket.MSG_DONTWAIT)
-                    return self.recv_socket_length(connection, head_data)
-                except socket.error:
-                    if not wait:
-                        return
-                    time.sleep(self.rate)
-                    self.check_poll()
-                    continue
-        command = recv_next(wait=wait)
+        command = self.recv_socket_next(connection, wait=wait)
         if command is not None:
             command = gen_to_string(command)
             log.debug('Waiting for socket data...')
-            data = recv_next(wait=True)
+            data = self.recv_socket_next(connection, wait=True)
             return command, data
         return None, None
 
@@ -257,6 +259,9 @@ class EuslispProcess(Process):
         # Process generator to avoid pendant messages
         data = gen_to_string(data)
         if command == 'read':
+            if self.read_busy:
+                return
+            self.read_busy = True
             return [Symbol(":read-string"), 0, 1]
         if command == 'read-mode':
             log.debug("Entering read mode...")
@@ -283,8 +288,15 @@ class EuslispProcess(Process):
     def get_socket_result(self, connection, wait=False):
         while True:
             gen = self.get_socket_response(connection)
-            if isinstance(gen, list):
-                # read-string
+            if isinstance(gen, list):  # read-string
+                # Don't notify read-mode to avoid cluttering the output of
+                # instantaneous bash commands, such as ls, pwd, etc
+                # if self.read_mode:
+                #     yield [Symbol(":write-string"),
+                #            "Entering read mode...\n",
+                #            Symbol(":repl-result")]
+                #     yield [Symbol(":write-string"), "$ ",
+                #            Symbol(":repl-result")]
                 yield gen
             elif gen is not None:
                 # Wait until output is finished
