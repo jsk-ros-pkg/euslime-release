@@ -1,3 +1,26 @@
+## euslime (melodic) - 1.1.3-1
+
+The packages in the `euslime` repository were released into the `melodic` distro by running `/usr/bin/bloom-release --rosdistro melodic --track melodic euslime` on `Wed, 12 Oct 2022 03:33:44 -0000`
+
+The `euslime` package was released.
+
+Version of package(s) in repository `euslime`:
+
+- upstream repository: https://github.com/jsk-ros-pkg/euslime.git
+- release repository: https://github.com/jsk-ros-pkg/euslime-release.git
+- rosdistro version: `1.1.2-1`
+- old version: `1.1.2-1`
+- new version: `1.1.3-1`
+
+Versions of tools used:
+
+- bloom version: `0.11.1`
+- catkin_pkg version: `0.4.24`
+- rosdep version: `0.21.0`
+- rosdistro version: `0.8.3`
+- vcstools version: `0.1.42`
+
+
 ## euslime (noetic) - 1.1.2-1
 
 The packages in the `euslime` repository were released into the `noetic` distro by running `/usr/bin/bloom-release --rosdistro noetic --track noetic euslime` on `Mon, 02 May 2022 04:03:05 -0000`
