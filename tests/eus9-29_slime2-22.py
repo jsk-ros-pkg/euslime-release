@@ -156,6 +156,24 @@ class eus(EuslimeTestCase):
              '(:return (:ok nil) 5)'],
             unordered_output=True)
 
+    def test_eval_14(self):
+        # multiple s-expressions
+        self.assertSocketWriteString(
+            '(:emacs-rex (swank-repl:listener-eval "(print 1) (print 2)\n") "USER" :repl-thread 9)',
+            '(:write-string "1\\n2\\n")',
+            '(:write-string "2" :repl-result)',
+            '(:write-string "\\n" :repl-result)',
+            '(:return (:ok nil) 9)')
+
+    def test_eval_15(self):
+        # multiple s-expressions
+        self.assertSocketWriteString(
+            '(:emacs-rex (swank-repl:listener-eval "(print 1) 10\n") "USER" :repl-thread 9)',
+            '(:write-string "1\\n")',
+            '(:write-string "10" :repl-result)',
+            '(:write-string "\\n" :repl-result)',
+            '(:return (:ok nil) 9)')
+
     # READ
     def test_read_1(self):
         # Both with and without slime-input-stream the behavior of toplevel read is ustable
@@ -353,7 +371,7 @@ class eus(EuslimeTestCase):
              '(:write-string "\\n" :repl-result)',
              '(:return (:ok nil) 30)'),
             (self.assertSocket,
-             '(:emacs-rex (swank-repl:listener-eval "(read s nil)~%") "USER" :repl-thread 31)',
+             '(:emacs-rex (swank-repl:listener-eval "(read s nil)\n") "USER" :repl-thread 31)',
              '(:write-string "2" :repl-result)',
              '(:write-string "\\n" :repl-result)',
              '(:return (:ok nil) 31)'),
@@ -2156,6 +2174,22 @@ class eus(EuslimeTestCase):
              '(:write-string "t" :repl-result)',
              '(:write-string "\\n" :repl-result)',
              '(:return (:ok nil) 13)'))
+
+    def test_load_file_6(self):
+        # test concurrent evaluations
+        self.with_unwind_protect(
+            (self.assertAsyncRequest,
+             ['(:emacs-rex (swank:load-file "{}/test_load_file_6.l") "USER" :repl-thread 6)'.format(os.getcwd()),
+              '(:emacs-rex (swank:find-tag-name-for-emacs "*test-load-file-6*" "USER") "USER" :repl-thread 7)'],
+             ['(:write-string "Loading file: {}/test_load_file_6.l ...\\n")'.format(os.getcwd()),
+              '(:write-string "Loaded.\\n")',
+              '(:return (:ok ("{0}/test_load_file_6.l")) 6)'.format(os.getcwd()),
+              '(:return (:ok ("*test-load-file-6*" "user::*test-load-file-6*")) 7)']),
+            (self.assertSocket,
+             '(:emacs-rex (swank-repl:listener-eval "(makunbound \'*test-load-file-6*)\n") "USER" :repl-thread 8)',
+             '(:write-string "t" :repl-result)',
+             '(:write-string "\\n" :repl-result)',
+             '(:return (:ok nil) 8)'))
 
     # MACRO EXPAND
     def test_macro_expand_1(self):
