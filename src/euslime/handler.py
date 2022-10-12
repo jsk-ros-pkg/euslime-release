@@ -6,7 +6,8 @@ import re
 import signal
 import traceback
 import time
-from sexpdata import dumps, loads, Symbol, Quoted
+from sexpdata import dumps, loads, parse
+from sexpdata import Symbol, Quoted
 from threading import Event
 
 from euslime.bridge import AbortEvaluation
@@ -17,6 +18,7 @@ from euslime.bridge import EuslispProcess
 from euslime.bridge import EuslispResult
 from euslime.bridge import no_color
 from euslime.logger import get_logger
+from euslime.bridge import DELIM
 
 log = get_logger(__name__)
 REGEX_LISP_VECTOR = re.compile(r' \\(#[0-9]*[a-zA-Z]*) \(')
@@ -115,6 +117,15 @@ class DebuggerHandler(object):
         ]
         return res
 
+    def make_debug_return(self, response_type='abort', delim=DELIM):
+        if self.message:
+            msg = self.message.split(delim)[0]
+            msg = repr(msg.rsplit(' in ', 1)[0])
+        else:
+            msg = None
+        yield [Symbol(':debug-return'), 0, self.level, Symbol('nil')]
+        yield [Symbol(':return'), {response_type: msg}, self.id]
+
 
 class EuslimeHandler(object):
     def __init__(self, *args, **kwargs):
@@ -158,6 +169,19 @@ class EuslimeHandler(object):
         elif result:
             return [dumps_vec(result), True]
         return None
+
+    def eval_repl_result(self, cmd):
+        for val in self.euslisp.eval(cmd):
+            if isinstance(val, str):
+                # Colors are not allowed in :repl-result formatting
+                yield [Symbol(":write-string"),
+                       no_color(val),
+                       Symbol(":repl-result")]
+                yield [Symbol(":write-string"),
+                       "\n",
+                       Symbol(":repl-result")]
+            else:
+                yield val
 
     def _emacs_return_string(self, process, count, msg):
         self.euslisp.input(msg)
@@ -236,17 +260,8 @@ class EuslimeHandler(object):
         log.debug('Acquiring lock: %s' % lock)
         lock.acquire()
         try:
-            for val in self.euslisp.eval(sexp):
-                if isinstance(val, str):
-                    # Colors are not allowed in :repl-result formatting
-                    yield [Symbol(":write-string"),
-                           no_color(val),
-                           Symbol(":repl-result")]
-                    yield [Symbol(":write-string"),
-                           "\n",
-                           Symbol(":repl-result")]
-                else:
-                    yield val
+            for val in self.eval_repl_result(sexp):
+                yield val
             if self.euslisp.read_mode or self.euslisp.read_busy:
                 log.debug("Aborting read mode...")
                 self.euslisp.read_mode = False
@@ -258,9 +273,10 @@ class EuslimeHandler(object):
             lock.release()
         except AbortEvaluation as e:
             log.info('Aborting evaluation...')
-            if self.euslisp.read_mode:
+            if self.euslisp.read_mode or self.euslisp.read_busy:
                 log.debug("Aborting read mode...")
                 self.euslisp.read_mode = False
+                self.euslisp.read_busy = False
                 yield [Symbol(":read-aborted"), 0, 1]
             for val in self.maybe_new_prompt():
                 yield val
@@ -290,6 +306,18 @@ class EuslimeHandler(object):
     def swank_repl_listener_eval(self, sexp):
         if self.debugger:
             return self.swank_throw_to_toplevel()
+        # quick fix for dealing with multiple s-expressions (#12)
+        try:
+            pexp = parse(sexp)
+            # anything that starts with an sexp and has some trailing part
+            if len(pexp) > 1 and type(pexp[0]) == list:
+                log.debug("Multiple s-expressions detected! Wrapping in progn")
+                sexp = "(progn {})".format(sexp)
+        except Exception:
+            # catch any possible parsing exceptions;
+            # we want to evaluate it anyways
+            log.error(traceback.format_exc())
+
         return self.swank_eval(sexp)
 
     def swank_pprint_eval(self, sexp):
@@ -432,12 +460,6 @@ Second, a boolean value telling whether the returned string can be cached.
         def check_key(key):
             return key in res_dict and num == res_dict[key]
 
-        def debug_return(db):
-            msg = db.message.split(self.euslisp.delim)[0]
-            msg = repr(msg.rsplit(' in ', 1)[0])
-            yield [Symbol(':debug-return'), 0, db.level, Symbol('nil')]
-            yield [Symbol(':return'), {'abort': msg}, db.id]
-
         if check_key('QUIT'):
             clear_stack = True
             self.euslisp.reset()
@@ -457,7 +479,7 @@ Second, a boolean value telling whether the returned string can be cached.
             for val in self.maybe_new_prompt():
                 yield val
             for db in reversed(self.debugger):
-                for val in debug_return(db):
+                for val in db.make_debug_return(delim=self.euslisp.delim):
                     yield val
             self.debugger = []
         else:
@@ -466,7 +488,7 @@ Second, a boolean value telling whether the returned string can be cached.
             if not self.debugger:
                 for val in self.maybe_new_prompt():
                     yield val
-            for val in debug_return(deb):
+            for val in deb.make_debug_return(delim=self.euslisp.delim):
                 yield val
             # Pop previous debugger, if any
             if self.debugger:
@@ -544,9 +566,14 @@ Second, a boolean value telling whether the returned string can be cached.
                              seconds, loadp, filename])
 
     def swank_load_file(self, filename):
+        # Block both streams while loading a file (issue #10)
+        # Maybe there are other alternatives?
         lock = self.euslisp.euslime_connection_lock
         log.debug('Acquiring lock: %s' % lock)
         lock.acquire()
+        internal_lock = self.euslisp.euslime_internal_connection_lock
+        log.debug('Acquiring lock: %s' % internal_lock)
+        internal_lock.acquire()
         yield [Symbol(":write-string"), "Loading file: %s ...\n" % filename]
         try:
             cmd = '(slime::load-file-and-tags "{0}")'.format(qstr(filename))
@@ -566,9 +593,12 @@ Second, a boolean value telling whether the returned string can be cached.
             yield [Symbol(":write-string"), "Loaded.\n"]
             yield EuslispResult(res)
             lock.release()
+            internal_lock.release()
         except AbortEvaluation as e:
             if lock.locked():
                 lock.release()
+            if internal_lock.locked():
+                internal_lock.release()
             log.info('Aborting evaluation...')
             # Force-print the message, which is
             # by default only displayed on the minibuffer
@@ -580,6 +610,8 @@ Second, a boolean value telling whether the returned string can be cached.
         except Exception:
             if lock.locked():
                 lock.release()
+            if internal_lock.locked():
+                internal_lock.release()
             raise
 
     def swank_inspect_current_condition(self):
