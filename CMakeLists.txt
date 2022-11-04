@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 2.8.3)
+
+# Suppress warning
+if (POLICY CMP0048)
+  cmake_policy(SET CMP0048 NEW)
+endif (POLICY CMP0048)
+
 project(euslime)
 
 find_package(catkin REQUIRED catkin_virtualenv)
@@ -21,7 +27,7 @@ if(Git_FOUND AND GIT_SUBMODULE)
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     RESULT_VARIABLE GIT_SUBMOD_RESULT)
   if(NOT GIT_SUBMOD_RESULT EQUAL "0")
-    message(FATAL_ERROR "git submodule update failed with ${GIT_SUBMOD_RESULT}")
+    message(WARNING "git submodule update failed with ${GIT_SUBMOD_RESULT}")
   endif()
 endif()
 
